@@ -1,5 +1,6 @@
 package com.pengxh.daily.app.utils
 
+import android.app.KeyguardManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -8,6 +9,7 @@ import android.os.BatteryManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import com.pengxh.daily.app.BuildConfig
 import com.pengxh.daily.app.service.CountDownTimerService
 import com.pengxh.daily.app.extensions.getTaskIndex
@@ -17,6 +19,7 @@ import com.pengxh.daily.app.ui.KeyguardDismissActivity
 import com.pengxh.daily.app.ui.MainActivity
 import com.pengxh.kt.lite.extensions.timestampToDate
 import com.pengxh.kt.lite.utils.SaveKeyValues
+import com.tencent.bugly.crashreport.CrashReport
 import org.greenrobot.eventbus.EventBus
 import org.greenrobot.eventbus.Subscribe
 import org.greenrobot.eventbus.ThreadMode
@@ -307,12 +310,21 @@ object DailyTaskController : TaskScheduler.TaskStateListener {
                 retryContext.startActivity(this)
             }
         } catch (e: Exception) {
+            val diagnostics = buildKeyguardFailureDiagnostics(
+                retryContext,
+                trackTaskResult,
+                remoteScreenshot,
+                advanceSchedulerOnResult,
+                "startActivityError=true"
+            )
             clearPendingKeyguardDismissRetry()
-            LogFileManager.writeLog("锁屏唤醒页面启动失败：${e.message ?: e.javaClass.simpleName}")
+            val failureMessage = "锁屏唤醒页面启动失败：${e.message ?: e.javaClass.simpleName}"
+            LogFileManager.writeLog(failureMessage)
+            reportKeyguardDismissFailure(failureMessage, e, diagnostics)
             return false
         }
         val retryRunnable = Runnable {
-            continueAfterKeyguardDismiss(false, "锁屏唤醒结果未返回")
+            continueAfterKeyguardDismiss(false, "锁屏唤醒结果未返回", "controllerTimeout=true")
         }
         keyguardDismissRetryRunnable = retryRunnable
         mainHandler.postDelayed(retryRunnable, KEYGUARD_DISMISS_WAIT_TIMEOUT_MS)
@@ -330,8 +342,19 @@ object DailyTaskController : TaskScheduler.TaskStateListener {
         pendingKeyguardDismissExecution = null
     }
 
-    private fun continueAfterKeyguardDismiss(success: Boolean, message: String) {
+    private fun continueAfterKeyguardDismiss(
+        success: Boolean,
+        message: String,
+        activityDiagnostics: String
+    ) {
         val pending = pendingKeyguardDismissExecution ?: return
+        val diagnostics = buildKeyguardFailureDiagnostics(
+            pending.context,
+            pending.trackTaskResult,
+            pending.remoteScreenshot,
+            pending.advanceSchedulerOnResult,
+            activityDiagnostics
+        )
         keyguardDismissRetryRunnable?.let { mainHandler.removeCallbacks(it) }
         keyguardDismissRetryRunnable = null
         keyguardDismissRetryPending = false
@@ -349,6 +372,7 @@ object DailyTaskController : TaskScheduler.TaskStateListener {
                     append("；设备仍处于锁屏状态，已取消本次自动执行")
                 }
             }
+            reportKeyguardDismissFailure(failureMessage, diagnostics = diagnostics)
             val stopTaskOnFailure = shouldStopTaskOnOpenFailure(
                 pending.trackTaskResult,
                 pending.remoteScreenshot,
@@ -446,6 +470,81 @@ object DailyTaskController : TaskScheduler.TaskStateListener {
         pendingDailyExecutionRetryRunnable = retryRunnable
         mainHandler.postDelayed(retryRunnable, ACTIVE_WINDOW_RETRY_DELAY_MS)
         LogFileManager.writeLog("当前仅有临时远程操作在执行，每日任务将在稍后重试")
+    }
+
+    private fun reportKeyguardDismissFailure(
+        message: String,
+        cause: Throwable? = null,
+        diagnostics: String = ""
+    ) {
+        val buglyMessage = buildString {
+            append("Keyguard dismiss failed: ")
+            append(message)
+            if (diagnostics.isNotBlank()) {
+                append("; diagnostics=[")
+                append(diagnostics)
+                append("]")
+            }
+        }
+        val exception = IllegalStateException(buglyMessage, cause)
+        CrashReport.postCatchedException(exception)
+        LogFileManager.writeLog("已上报 Bugly：$buglyMessage")
+    }
+
+    private fun buildKeyguardFailureDiagnostics(
+        context: Context,
+        trackTaskResult: Boolean,
+        remoteScreenshot: Boolean,
+        advanceSchedulerOnResult: Boolean,
+        activityDiagnostics: String
+    ): String {
+        val appContext = context.applicationContext
+        val keyguardManager = appContext.getSystemService(KeyguardManager::class.java)
+        val powerManager = appContext.getSystemService(PowerManager::class.java)
+        val parts = mutableListOf(
+            "source=${resolveKeyguardExecutionSource(trackTaskResult, remoteScreenshot, advanceSchedulerOnResult)}",
+            "trackTaskResult=$trackTaskResult",
+            "remoteScreenshot=$remoteScreenshot",
+            "advanceSchedulerOnResult=$advanceSchedulerOnResult",
+            "taskSchedulerStarted=${taskScheduler.isTaskStarted()}",
+            "controllerTaskStarted=$taskStarted",
+            "savedTaskStarted=${SaveKeyValues.getValue(Constant.TASK_RUNNING_STATE_KEY, false) as Boolean}",
+            "timeoutRunning=${timeoutTimerManager.isRunning()}",
+            "remoteScreenshotTimerRunning=$remoteScreenshotTimerRunning",
+            "keyguardDismissRetryPending=$keyguardDismissRetryPending",
+            "pendingDailyRetry=${pendingDailyExecutionRetryRunnable != null}",
+            "deferredSchedulerAdvance=$deferredSchedulerAdvanceAfterManualExecution",
+            "keyguardLocked=${keyguardManager?.isKeyguardLocked}",
+            "deviceLocked=${keyguardManager?.isDeviceLocked}",
+            "keyguardSecure=${keyguardManager?.isKeyguardSecure}",
+            "deviceSecure=${keyguardManager?.isDeviceSecure}",
+            "interactive=${powerManager?.isInteractive}",
+            "manufacturer=${Build.MANUFACTURER}",
+            "brand=${Build.BRAND}",
+            "model=${Build.MODEL}",
+            "device=${Build.DEVICE}",
+            "display=${Build.DISPLAY}",
+            "androidRelease=${Build.VERSION.RELEASE}",
+            "sdk=${Build.VERSION.SDK_INT}",
+            "incremental=${Build.VERSION.INCREMENTAL}"
+        )
+        if (activityDiagnostics.isNotBlank()) {
+            parts += "activity={$activityDiagnostics}"
+        }
+        return parts.joinToString("; ")
+    }
+
+    private fun resolveKeyguardExecutionSource(
+        trackTaskResult: Boolean,
+        remoteScreenshot: Boolean,
+        advanceSchedulerOnResult: Boolean
+    ): String {
+        return when {
+            remoteScreenshot -> "remoteScreenshot"
+            advanceSchedulerOnResult -> "dailySchedule"
+            trackTaskResult -> "remoteManual"
+            else -> "remoteOperation"
+        }
     }
 
     private fun startTaskTimeoutTimer(advanceSchedulerOnResult: Boolean) {
@@ -701,7 +800,7 @@ object DailyTaskController : TaskScheduler.TaskStateListener {
         when (event) {
             is ApplicationEvent.CaptureCompleted -> imagePath = event.imagePath
             is ApplicationEvent.KeyguardDismissFinished -> {
-                continueAfterKeyguardDismiss(event.success, event.message)
+                continueAfterKeyguardDismiss(event.success, event.message, event.diagnostics)
             }
 
             else -> {}

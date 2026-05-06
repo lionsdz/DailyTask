@@ -34,7 +34,7 @@ class DailyTaskApplication : Application() {
         SaveKeyValues.initSharedPreferences(this)
         LogFileManager.initLogFile(this)
 
-        CrashReport.initCrashReport(this, "ecbdc9baf5", BuildConfig.DEBUG)
+        CrashReport.initCrashReport(this, "f025ea8e82", BuildConfig.DEBUG)
 
         dataBase = databaseBuilder(this, DailyTaskDataBase::class.java, "DailyTask.db")
             .allowMainThreadQueries()

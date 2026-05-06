@@ -5,6 +5,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.view.Gravity
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -179,9 +180,40 @@ class KeyguardDismissActivity : AppCompatActivity() {
         if (finished) return
         finished = true
         handler.removeCallbacks(timeoutRunnable)
+        val diagnostics = buildDiagnostics(success)
         LogFileManager.writeLog(message)
-        EventBus.getDefault().post(ApplicationEvent.KeyguardDismissFinished(success, message))
+        LogFileManager.writeLog("锁屏唤醒诊断：$diagnostics")
+        EventBus.getDefault().post(
+            ApplicationEvent.KeyguardDismissFinished(success, message, diagnostics)
+        )
         finish()
+    }
+
+    private fun buildDiagnostics(success: Boolean): String {
+        val keyguardManager = getSystemService(KeyguardManager::class.java)
+        val powerManager = getSystemService(PowerManager::class.java)
+        return listOf(
+            "activitySuccess=$success",
+            "attempts=$dismissAttempts",
+            "resumed=$resumed",
+            "hasWindowFocus=$hasWindowFocus",
+            "dismissRequestScheduled=$dismissRequestScheduled",
+            "isFinishing=$isFinishing",
+            "isDestroyed=$isDestroyed",
+            "keyguardLocked=${keyguardManager?.isKeyguardLocked}",
+            "deviceLocked=${keyguardManager?.isDeviceLocked}",
+            "keyguardSecure=${keyguardManager?.isKeyguardSecure}",
+            "deviceSecure=${keyguardManager?.isDeviceSecure}",
+            "interactive=${powerManager?.isInteractive}",
+            "manufacturer=${Build.MANUFACTURER}",
+            "brand=${Build.BRAND}",
+            "model=${Build.MODEL}",
+            "device=${Build.DEVICE}",
+            "display=${Build.DISPLAY}",
+            "androidRelease=${Build.VERSION.RELEASE}",
+            "sdk=${Build.VERSION.SDK_INT}",
+            "incremental=${Build.VERSION.INCREMENTAL}"
+        ).joinToString("; ")
     }
 
     override fun onDestroy() {

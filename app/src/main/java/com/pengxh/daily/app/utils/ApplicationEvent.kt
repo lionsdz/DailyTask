@@ -34,7 +34,8 @@ sealed class ApplicationEvent {
     object HolidayDataStatusChanged : ApplicationEvent()
     data class KeyguardDismissFinished(
         val success: Boolean,
-        val message: String
+        val message: String,
+        val diagnostics: String = ""
     ) : ApplicationEvent()
 
     data class DailyTaskExecuting(
